@@ -2,9 +2,10 @@ import { readFile, mkdir, writeFile, rename } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { assertPublicSnapshot, parseRSS, parseBilibili, parseWeibo, preserveFailedSource } from './data-utils.mjs';
+import { assertPublicSnapshot, parseRSS, parseBilibili, preserveFailedSource } from './data-utils.mjs';
 import { collectOptionalQuotes, emptyQuotes } from './quotes.mjs';
 import { collectXiaohongshu } from './xiaohongshu.mjs';
+import { collectWeibo } from './weibo.mjs';
 
 const project = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const output = resolve(project, 'public/data/snapshot.json');
@@ -20,7 +21,6 @@ const feeds = [
 
 const trends = [
   { id: 'bilibili-rank', label: 'B 站 · 综合排行榜', category: 'trends', platform: 'bilibili', homepage: 'https://www.bilibili.com/v/popular/rank/all', endpoint: 'https://api.bilibili.com/x/web-interface/ranking/v2?rid=0&type=all', parser: parseBilibili, attribution: '哔哩哔哩 · 原榜单顺序，热度为原平台播放数' },
-  { id: 'weibo-hot', label: '微博 · 热搜', category: 'trends', platform: 'weibo', homepage: 'https://s.weibo.com/top/summary', endpoint: 'https://weibo.com/ajax/side/hotSearch', parser: parseWeibo, attribution: '微博 · 原平台热搜' },
 ];
 
 let previous = { sources: [], items: [], quotes: [] };
@@ -38,7 +38,7 @@ export async function fetchPublic(url, { json = false, encoding = 'utf-8' } = {}
   return json ? JSON.parse(text) : text;
 }
 
-const results = await Promise.all([...feeds, ...trends].map(async (definition) => {
+const [publicResults, weiboResult] = await Promise.all([Promise.all([...feeds, ...trends].map(async (definition) => {
   const { endpoint, parser, ...source } = definition;
   try {
     const raw = await fetchPublic(endpoint, { json: Boolean(parser) });
@@ -51,7 +51,9 @@ const results = await Promise.all([...feeds, ...trends].map(async (definition) =
     console.log('UNAVAILABLE', source.id, message);
     return preserveFailedSource(source, previous, now, message);
   }
-}));
+})), collectWeibo({ now, previous })]);
+const results = [...publicResults, weiboResult];
+console.log(weiboResult.source.status === 'ok' ? 'OK' : 'UNAVAILABLE', 'weibo-hot', weiboResult.items.length + ' 条；' + weiboResult.source.message);
 
 const quoteResult = await collectOptionalQuotes({ now, previous, fetchPublic });
 const xiaohongshuResult = await collectXiaohongshu({ now, previous });
