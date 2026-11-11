@@ -68,8 +68,8 @@ test('the documented note access parameter is retained in its note link while au
   const [item] = parseXiaohongshuRecommendations({ data: { items: [card] } }, now);
   assert.equal(new URL(item.url).searchParams.get('xsec_token'), card.xsec_token);
   assert.ok(!JSON.stringify(item).includes('private-user-token'));
-  card.note_card.note_url = 'https://www.xiaohongshu.com/explore/' + noteId + '?xsec_token=existing-public-link';
-  const [existing] = parseXiaohongshuRecommendations({ data: { items: [card] } }, now);
+  const existingCard = { ...card, note_card: { ...card.note_card, note_url: 'https://www.xiaohongshu.com/explore/' + noteId + '?xsec_token=existing-public-link' } };
+  const [existing] = parseXiaohongshuRecommendations({ data: { items: [existingCard] } }, now);
   assert.equal(new URL(existing.url).searchParams.get('xsec_token'), 'existing-public-link');
   assert.equal(existing.id, item.id);
   const authorOnly = structuredClone(response.data.items[0]);
