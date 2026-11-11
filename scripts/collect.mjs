@@ -56,7 +56,7 @@ const results = [...publicResults, weiboResult];
 console.log(weiboResult.source.status === 'ok' ? 'OK' : 'UNAVAILABLE', 'weibo-hot', weiboResult.items.length + ' 条；' + weiboResult.source.message);
 
 const quoteResult = await collectOptionalQuotes({ now, previous, fetchPublic });
-const xiaohongshuResult = await collectXiaohongshu({ now, previous });
+const xiaohongshuResult = await collectXiaohongshu({ now, previous, forceRefresh: process.env.FORCE_XIAOHONGSHU_REFRESH === 'true' });
 const snapshot = assertPublicSnapshot({
   schemaVersion: 1,
   generationId: randomUUID(),

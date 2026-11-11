@@ -7,7 +7,7 @@ const now = '2026-11-11T12:00:00.000Z';
 const noteId = '6ad817e6000000002403ce45';
 const response = {
   code: 0, data: { items: [{
-    id: noteId, model_type: 'note', xsec_token: 'not-copied-from-an-arbitrary-field',
+    id: noteId, model_type: 'note', xsec_token: 'not a valid public access parameter',
     note_card: {
       display_title: '<b>A real title in a test fixture</b>', type: 'video',
       user: { nick_name: 'Author', user_id: 'not-collected', xsec_token: 'private-user-token' },
@@ -33,7 +33,7 @@ test('recommendations normalize documented feed cards without inventing ranks, d
   assert.equal(items[0].body, undefined);
   assert.equal(items[0].fetchedAt, now);
   assert.ok(!JSON.stringify(items).includes('private-user-token'));
-  assert.ok(!JSON.stringify(items).includes('not-copied-from-an-arbitrary-field'));
+  assert.ok(!JSON.stringify(items).includes('not a valid public access parameter'));
 });
 
 test('nested provider envelopes deduplicate notes independently of ephemeral public link parameters', () => {
@@ -47,6 +47,35 @@ test('nested provider envelopes deduplicate notes independently of ephemeral pub
   assert.equal(result.length, 1);
   assert.ok(result[0].url.includes('xsec_token=public-share'));
   assert.ok(!result[0].url.includes('secret='));
+});
+
+test('the observed SandBase gateway outputs envelope yields real note cards rather than the wrapper record', () => {
+  const envelope = { id: 'test-request-id', status: 'completed', model: 'xiaohongshu/web-v3/homefeed', outputs: [{ data: { ...response, success: true, ok: true } }] };
+  const result = parseXiaohongshuRecommendations(envelope, now);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].title, 'A real title in a test fixture');
+  assert.equal(result[0].author, 'Author');
+  assert.equal(result[0].mediaType, 'video');
+  assert.ok(!JSON.stringify(result).includes('test-request-id'));
+  assert.throws(() => parseXiaohongshuRecommendations({ ...envelope, status: 'failed' }, now));
+  assert.throws(() => parseXiaohongshuRecommendations({ ...envelope, status: 'running' }, now));
+  assert.throws(() => parseXiaohongshuRecommendations({ ...envelope, outputs: [{ data: { ...response, success: false } }] }, now));
+});
+
+test('the documented note access parameter is retained in its note link while author and session credentials are excluded', () => {
+  const card = structuredClone(response.data.items[0]);
+  card.xsec_token = 'public-note-access-parameter-for-local-test';
+  const [item] = parseXiaohongshuRecommendations({ data: { items: [card] } }, now);
+  assert.equal(new URL(item.url).searchParams.get('xsec_token'), card.xsec_token);
+  assert.ok(!JSON.stringify(item).includes('private-user-token'));
+  card.note_card.note_url = 'https://www.xiaohongshu.com/explore/' + noteId + '?xsec_token=existing-public-link';
+  const [existing] = parseXiaohongshuRecommendations({ data: { items: [card] } }, now);
+  assert.equal(new URL(existing.url).searchParams.get('xsec_token'), 'existing-public-link');
+  assert.equal(existing.id, item.id);
+  const authorOnly = structuredClone(response.data.items[0]);
+  delete (authorOnly as { xsec_token?: string }).xsec_token;
+  const [withoutNoteToken] = parseXiaohongshuRecommendations({ data: { items: [authorOnly] } }, now);
+  assert.equal(new URL(withoutNoteToken.url).searchParams.get('xsec_token'), null);
 });
 
 test('invalid URLs, unsafe covers and ambiguous dates do not become publicly displayed metadata', () => {
@@ -129,6 +158,18 @@ test('an hour-old failed attempt may retry while external unconfigured state nev
   const connected = await collectXiaohongshu({ now, env: { SANDBASE_API_KEY: 'test-key' }, previous: { sources: [initial], items: [] }, fetchImpl });
   assert.equal(connected.source.status, 'ok');
   assert.equal(calls, 2);
+});
+
+test('an explicit configuration refresh bypasses the cooldown once without adding retries or bypassing credentials', async () => {
+  let calls = 0;
+  const previous = { sources: [{ ...XIAOHONGSHU_SOURCE, attribution: XIAOHONGSHU_SOURCE.attribution + ' · SandBase', status: 'unavailable', lastSuccessAt: null, lastAttemptAt: now }], items: [] };
+  const fetchImpl = async () => { calls++; return new Response(JSON.stringify({ outputs: [{ data: response }] }), { status: 200 }); };
+  const result = await collectXiaohongshu({ now, previous, env: { SANDBASE_API_KEY: 'test-key' }, forceRefresh: true, fetchImpl });
+  assert.equal(calls, 1);
+  assert.equal(result.source.status, 'ok');
+  const unconfigured = await collectXiaohongshu({ now, previous, env: {}, forceRefresh: true, fetchImpl });
+  assert.equal(calls, 1);
+  assert.equal(unconfigured.source.status, 'external');
 });
 
 test('switching to another explicitly configured provider does not reuse a failure cooldown', async () => {

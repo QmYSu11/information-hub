@@ -30,21 +30,29 @@ const noteIdPattern = /^[0-9a-f]{24}$/i;
 const postHost = host => ['www.xiaohongshu.com', 'xiaohongshu.com', 'www.rednote.com', 'rednote.com'].includes(host.toLowerCase());
 const coverHost = host => ['xhscdn.com', 'rednotecdn.com', 'xiaohongshu.com'].some(base => host === base || host.endsWith('.' + base));
 
-function publicPostUrl(candidate, noteId) {
+function publicPostUrl(candidate, noteId, noteToken) {
+  const validNoteToken = typeof noteToken === 'string' && /^[A-Za-z0-9+/_-]{16,510}={0,2}$/.test(noteToken) ? noteToken : undefined;
+  const addPublicNoteToken = url => {
+    const urlNoteId = url.pathname.split('/').filter(Boolean).at(-1)?.toLowerCase();
+    if (validNoteToken && noteIdPattern.test(noteId || '') && urlNoteId === noteId.toLowerCase() && !url.searchParams.has('xsec_token')) {
+      url.searchParams.set('xsec_token', validNoteToken);
+    }
+    return url.href;
+  };
   const value = safeUrl(candidate);
   if (value) {
     const url = new URL(value);
     if (postHost(url.hostname) && /^\/(?:explore|discovery\/item)\/[a-f0-9]{24}\/?$/i.test(url.pathname)) {
       // Keep only public link parameters already supplied by the provider.
-      // Do not collect user/session tokens or synthesize platform signatures.
+      // Only the documented note-level public access parameter is accepted; never the author's user token.
       for (const key of [...url.searchParams.keys()]) {
         if (!['xsec_token', 'xsec_source'].includes(key)) url.searchParams.delete(key);
       }
       url.hash = '';
-      return url.href;
+      return addPublicNoteToken(url);
     }
   }
-  return noteIdPattern.test(noteId || '') ? 'https://www.xiaohongshu.com/explore/' + noteId.toLowerCase() : undefined;
+  return noteIdPattern.test(noteId || '') ? addPublicNoteToken(new URL('https://www.xiaohongshu.com/explore/' + noteId.toLowerCase())) : undefined;
 }
 function coverUrl(card) {
   const cover = record(card.cover) ? card.cover : {};
@@ -84,6 +92,7 @@ function findFeedEntries(response, depth = 0) {
   if (Array.isArray(response)) return response;
   if (!record(response)) return undefined;
   if (response.success === false || response.ok === false) throw new Error('推荐服务没有返回成功结果');
+  if (['failed', 'timeout', 'cancelled', 'canceled'].includes(response.status)) throw new Error('推荐服务返回了错误状态');
   if (response.code !== undefined && ![0, 200, '0', '200'].includes(response.code)) throw new Error('推荐服务返回了错误状态');
   for (const name of ['items', 'notes', 'feeds', 'note_list', 'noteList', 'list']) {
     if (Array.isArray(response[name])) return response[name];
@@ -91,6 +100,15 @@ function findFeedEntries(response, depth = 0) {
   for (const name of ['data', 'result', 'response', 'payload']) {
     const value = findFeedEntries(response[name], depth + 1);
     if (value) return value;
+  }
+  // SandBase's actual gateway response wraps the platform response in outputs[n].data.
+  if (Array.isArray(response.outputs)) {
+    if (typeof response.status === 'string' && response.status !== 'completed') throw new Error('推荐服务没有返回成功结果');
+    for (const output of response.outputs.slice(0, 5)) {
+      if (!record(output)) continue;
+      const value = findFeedEntries(output.data, depth + 1);
+      if (value) return value;
+    }
   }
   return undefined;
 }
@@ -108,7 +126,7 @@ export function parseXiaohongshuRecommendations(response, now) {
     if (card.type && !['normal', 'image', 'video', 'note'].includes(card.type)) continue;
     const candidateUrl = card.note_url || card.noteUrl || card.share_url || entry.note_url || entry.share_url || entry.url;
     const id = String(entry.note_id || entry.noteId || card.note_id || card.noteId || entry.id || card.id || '');
-    const url = publicPostUrl(candidateUrl, id);
+    const url = publicPostUrl(candidateUrl, id, entry.model_type === 'note' ? entry.xsec_token : undefined);
     if (!url) continue;
     const urlNoteId = new URL(url).pathname.split('/').filter(Boolean).at(-1)?.toLowerCase();
     if (!urlNoteId || seen.has(urlNoteId)) continue;
@@ -156,7 +174,7 @@ async function readResponse(response) {
   catch { throw new Error('推荐服务没有返回可读取的数据'); }
 }
 
-export async function collectXiaohongshu({ now, previous, env = process.env, fetchImpl = globalThis.fetch }) {
+export async function collectXiaohongshu({ now, previous, env = process.env, fetchImpl = globalThis.fetch, forceRefresh = false }) {
   const providerId = env.SANDBASE_API_KEY ? 'sandbase' : env.TIKHUB_API_KEY ? 'tikhub' : undefined;
   const oldSource = previous.sources?.find(source => source.id === XIAOHONGSHU_SOURCE.id);
   if (!providerId) {
@@ -175,7 +193,7 @@ export async function collectXiaohongshu({ now, previous, env = process.env, fet
   const attemptAge = Date.parse(now) - Date.parse(oldSource?.lastAttemptAt || oldSource?.lastSuccessAt || '');
   const oldItems = (previous.items || []).filter(item => item.sourceId === source.id);
   // One 20-note page per hour, at most 24 scheduled calls/day. No hidden retries/pagination.
-  if (oldSource && oldSource.status !== 'external' && oldSource.attribution === source.attribution && attemptAge >= 0 && attemptAge < 60 * 60_000) {
+  if (forceRefresh !== true && oldSource && oldSource.status !== 'external' && oldSource.attribution === source.attribution && attemptAge >= 0 && attemptAge < 60 * 60_000) {
     return { source: { ...source, status: oldSource.status, lastSuccessAt: oldSource.lastSuccessAt || null, lastAttemptAt: oldSource.lastAttemptAt || oldSource.lastSuccessAt, message: oldSource.status === 'ok' ? '每小时更新的推荐快照，不是个人账号的推荐流' : oldSource.message || '推荐服务等待下次更新，保留最近可用内容' }, items: oldItems };
   }
   try {

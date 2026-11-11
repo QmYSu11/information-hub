@@ -4,6 +4,12 @@ on:
   push:
     branches: [main, master]
   workflow_dispatch:
+    inputs:
+      refresh_recommendations:
+        description: '重新连接小红书（更换密钥或修复接入后使用，将额外调用一次接口）'
+        required: false
+        default: false
+        type: boolean
   schedule:
     - cron: '7,37 * * * *'
 
@@ -41,6 +47,7 @@ jobs:
           ENABLE_TENCENT_QUOTES: ${{ vars.ENABLE_TENCENT_QUOTES }}
           SANDBASE_API_KEY: ${{ secrets.SANDBASE_API_KEY }}
           TIKHUB_API_KEY: ${{ secrets.TIKHUB_API_KEY }}
+          FORCE_XIAOHONGSHU_REFRESH: ${{ github.event_name == 'workflow_dispatch' && inputs.refresh_recommendations }}
       - run: npm test
       - name: Verify snapshot persistence with isolated local Git repositories
         run: node scripts/verify-snapshot-state.mjs
