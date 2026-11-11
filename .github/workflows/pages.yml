@@ -1,0 +1,57 @@
+name: Update information and publish Pages
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+  schedule:
+    - cron: '7,37 * * * *'
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: information-hub-pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Restore last source snapshot
+        run: node scripts/snapshot-state.mjs restore
+      - name: Fetch available public sources
+        run: npm run collect
+        env:
+          # Off by default. Only enable after checking your provider's display rights.
+          ENABLE_TENCENT_QUOTES: ${{ vars.ENABLE_TENCENT_QUOTES }}
+      - run: npm test
+      - name: Verify snapshot persistence with isolated local Git repositories
+        run: node scripts/verify-snapshot-state.mjs
+      - name: Build for repository Pages path
+        run: npm run build
+        env:
+          BASE_PATH: ${{ endsWith(github.event.repository.name, '.github.io') && '/' || format('/{0}/', github.event.repository.name) }}
+      - name: Retain public snapshots across runs
+        run: node scripts/snapshot-state.mjs persist
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+      - name: Publish
+        id: deployment
+        uses: actions/deploy-pages@v4
