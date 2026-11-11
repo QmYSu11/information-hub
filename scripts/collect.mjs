@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { assertPublicSnapshot, parseRSS, parseBilibili, parseWeibo, preserveFailedSource } from './data-utils.mjs';
 import { collectOptionalQuotes, emptyQuotes } from './quotes.mjs';
+import { collectXiaohongshu } from './xiaohongshu.mjs';
 
 const project = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const output = resolve(project, 'public/data/snapshot.json');
@@ -53,16 +54,17 @@ const results = await Promise.all([...feeds, ...trends].map(async (definition) =
 }));
 
 const quoteResult = await collectOptionalQuotes({ now, previous, fetchPublic });
+const xiaohongshuResult = await collectXiaohongshu({ now, previous });
 const snapshot = assertPublicSnapshot({
   schemaVersion: 1,
   generationId: randomUUID(),
   generatedAt: now,
   sources: [
     ...results.map(r => r.source),
-    { id: 'xiaohongshu-hot', label: '小红书 · 热榜', category: 'trends', platform: 'xiaohongshu', homepage: 'https://www.xiaohongshu.com/explore', status: 'external', lastSuccessAt: null, message: '暂未接入可验证的公开热榜源，请到原站查看' },
+    xiaohongshuResult.source,
     ...quoteResult.sources,
   ],
-  items: results.flatMap(r => r.items),
+  items: [...results.flatMap(r => r.items), ...xiaohongshuResult.items],
   quotes: quoteResult.quotes.length ? quoteResult.quotes : emptyQuotes(now),
 });
 

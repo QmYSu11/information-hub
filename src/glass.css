@@ -171,6 +171,10 @@ body::after { content: ""; position: fixed; inset: 0; z-index: -1; background: v
 .rail-section { margin-top: 18px; }
 .market-mini { padding: 11px 0; font-size: 11px; }
 .market-mini strong { font-size: 12px; font-weight: 550; }
+.market-watch-link { width: 100%; text-align: left; border-bottom: 1px solid var(--line); gap: 7px; }
+.market-watch-link:last-of-type { border-bottom: 0; }
+.market-watch-link:hover { color: var(--accent); }
+.watch-chart-link { display: flex; align-items: center; gap: 3px; color: var(--accent); font-size: 9px; white-space: nowrap; }
 .market-mini small { font-size: 8px; max-width: 125px; }
 .daily-note { background: linear-gradient(135deg, var(--panel-2), color-mix(in srgb, var(--panel) 85%, #f0e0ee)); padding: 21px; }
 .daily-note>p { font-size: 12px; line-height: 1.9; }

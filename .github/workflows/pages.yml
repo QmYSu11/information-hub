@@ -39,6 +39,8 @@ jobs:
         env:
           # Off by default. Only enable after checking your provider's display rights.
           ENABLE_TENCENT_QUOTES: ${{ vars.ENABLE_TENCENT_QUOTES }}
+          SANDBASE_API_KEY: ${{ secrets.SANDBASE_API_KEY }}
+          TIKHUB_API_KEY: ${{ secrets.TIKHUB_API_KEY }}
       - run: npm test
       - name: Verify snapshot persistence with isolated local Git repositories
         run: node scripts/verify-snapshot-state.mjs

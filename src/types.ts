@@ -6,7 +6,8 @@ export interface ContentItem {
   title: string;
   url: string;
   channel: Channel;
-  kind: 'article' | 'video' | 'topic';
+  kind: 'article' | 'video' | 'topic' | 'post';
+  mediaType?: 'image' | 'video';
   description?: string;
   image?: string;
   publishedAt?: string;
@@ -21,7 +22,7 @@ export interface ContentItem {
 export interface Source {
   id: string;
   label: string;
-  category: 'news' | 'trends' | 'markets';
+  category: 'news' | 'trends' | 'markets' | 'recommendations';
   channel?: Channel;
   platform?: Platform;
   homepage: string;

@@ -1,4 +1,6 @@
 import type { ContentItem } from '../types';
+import { CHART_INTERVALS, mergeInstruments, migrateWatchlist, normalizeSymbol, parseInstrument } from './market-model';
+import type { Instrument } from './market-model';
 
 export interface Note {
   id: string; title: string; body: string; folder: string; tags: string[];
@@ -18,6 +20,8 @@ export interface Preferences {
   density: 'comfortable' | 'compact'; fontSize: number;
   readerWidth: 'narrow' | 'standard' | 'wide'; blockedKeywords: string[];
   disabledSources: string[]; watchlist: string[]; notificationsEnabled?: boolean;
+  customSymbols?: Instrument[]; activeSymbol?: string;
+  chartInterval?: string; chartStyle?: 'candles' | 'line';
 }
 export interface PersonalData {
   schemaVersion: 1; notes: Note[]; reminders: Reminder[];
@@ -96,12 +100,13 @@ export function safeUrl(x: unknown): string | undefined {
 function content(x: unknown): ContentItem {
   if (!record(x) || !safeUrl(x.url)) throw new Error('备份引用链接无效');
   const channels = ['国内', '国际', '科技', '趣事', '财经'];
-  const kinds = ['article', 'video', 'topic'];
+  const kinds = ['article', 'video', 'topic', 'post'];
   if (!channels.includes(String(x.channel)) || !kinds.includes(String(x.kind))) throw new Error('备份内容类型无效');
   return {
     id: str(x.id, '内容ID', 2000), sourceId: str(x.sourceId, '来源', 1000),
     title: str(x.title, '内容标题'), url: safeUrl(x.url)!, channel: x.channel as ContentItem['channel'],
     kind: x.kind as ContentItem['kind'], fetchedAt: timestamp(x.fetchedAt, '获取时间'),
+    ...(['image', 'video'].includes(String(x.mediaType)) ? { mediaType: x.mediaType as 'image' | 'video' } : {}),
     ...(typeof x.description === 'string' ? { description: str(x.description, '摘要', 500_000) } : {}),
     ...(safeUrl(x.image) ? { image: safeUrl(x.image) } : {}),
     ...(typeof x.publishedAt === 'string' ? { publishedAt: timestamp(x.publishedAt, '发布时间') } : {}),
@@ -158,6 +163,23 @@ export function parseBackup(text: string): PersonalData {
     blockedKeywords: strings(p.blockedKeywords, '屏蔽词'), disabledSources: strings(p.disabledSources, '来源'),
     watchlist: strings(p.watchlist, '自选'), notificationsEnabled: p.notificationsEnabled === true,
   };
+  if (p.customSymbols !== undefined) {
+    if (!Array.isArray(p.customSymbols) || p.customSymbols.length > 500) throw new Error('自定义标的列表无效');
+    preferences.customSymbols = mergeInstruments([], p.customSymbols.map(parseInstrument));
+  }
+  if (p.activeSymbol !== undefined) {
+    const symbol = typeof p.activeSymbol === 'string' ? normalizeSymbol(p.activeSymbol) : null;
+    if (!symbol) throw new Error('当前标的代码无效');
+    preferences.activeSymbol = symbol;
+  }
+  if (p.chartInterval !== undefined) {
+    if (!(CHART_INTERVALS as readonly unknown[]).includes(p.chartInterval)) throw new Error('图表周期无效');
+    preferences.chartInterval = p.chartInterval as string;
+  }
+  if (p.chartStyle !== undefined) {
+    if (!['candles', 'line'].includes(String(p.chartStyle))) throw new Error('图表样式无效');
+    preferences.chartStyle = p.chartStyle as Preferences['chartStyle'];
+  }
   for (const values of [notes.map(n => n.id), reminders.map(r => r.id), saved.map(s => s.kind + s.id)]) {
     if (new Set(values).size !== values.length) throw new Error('备份含重复 ID，请使用未修改的导出文件');
   }
@@ -183,9 +205,13 @@ export function mergeBackup(current: PersonalData, incoming: PersonalData): Pers
   incoming.saved.forEach(s => saved.set(s.kind + ':' + s.id, s));
   result.saved = [...saved.values()];
   result.readIds = [...new Set([...result.readIds, ...incoming.readIds])];
-  result.preferences = { ...incoming.preferences,
+  result.preferences = { ...current.preferences, ...incoming.preferences,
     blockedKeywords: [...new Set([...current.preferences.blockedKeywords, ...incoming.preferences.blockedKeywords])],
-    watchlist: [...new Set([...current.preferences.watchlist, ...incoming.preferences.watchlist])] };
+    watchlist: migrateWatchlist([...current.preferences.watchlist, ...incoming.preferences.watchlist]),
+    ...(current.preferences.customSymbols || incoming.preferences.customSymbols ? {
+      customSymbols: mergeInstruments(current.preferences.customSymbols || [], incoming.preferences.customSymbols || []),
+    } : {}),
+  };
   result.gameSave = incoming.gameSave ?? current.gameSave;
   return result;
 }
