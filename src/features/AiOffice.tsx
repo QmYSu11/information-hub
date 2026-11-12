@@ -7,6 +7,7 @@ import { approveOfficeTask, cancelOfficeTask, chooseOfficeMaterials, getOfficeFe
 import type { OfficePlan, OfficeProviderId, OfficeReply, OfficeSession, OfficeStatus, OfficeTemplate } from '../lib/office-client';
 import './ai-office.css';
 import OfficeConnections from './OfficeConnections';
+import OfficeChat from './OfficeChat';
 
 type Props = { items: ContentItem[]; sources: Source[]; watchSymbols?: string[]; notes?: { id: string; title: string; body: string }[]; privateOfficeUrl?: string; standalone?: boolean; onOpen?: (item: ContentItem) => void };
 const templates: { id: OfficeTemplate; label: string; prompt: string }[] = [
@@ -31,6 +32,9 @@ function Reply({ reply, items, onOpen }: { reply: OfficeReply; items: ContentIte
 export default function AiOffice({ items, sources, watchSymbols = [], notes = [], privateOfficeUrl, standalone = false, onOpen }: Props) {
   const [status, setStatus] = useState<OfficeStatus | null>(null);
   const [statusLoading, setStatusLoading] = useState(standalone);
+  const [mode, setMode] = useState<'chat' | 'team'>('chat');
+  const [refreshingMaterials, setRefreshingMaterials] = useState(false);
+  const [materialError, setMaterialError] = useState('');
   const [remoteFeed, setRemoteFeed] = useState<{ items: ContentItem[]; sources: Source[] } | null>(null);
   const [template, setTemplate] = useState<OfficeTemplate>('general');
   const [task, setTask] = useState('');
@@ -62,11 +66,18 @@ export default function AiOffice({ items, sources, watchSymbols = [], notes = []
     catch (cause) { setError(cause instanceof Error ? cause.message : '暂时无法连接办公室。'); }
     finally { setStatusLoading(false); }
   }
+  async function refreshMaterials() {
+    if (!standalone || refreshingMaterials) return;
+    setRefreshingMaterials(true); setMaterialError('');
+    try { const feed = parseSnapshot(await getOfficeFeed()); setRemoteFeed({ items: feed.items, sources: feed.sources }); }
+    catch { setMaterialError('暂时无法刷新新闻，仍显示上次载入的资料，请留意各条来源时间。'); }
+    finally { setRefreshingMaterials(false); }
+  }
   useEffect(() => {
     if (!standalone) return;
     void refreshStatus();
     const controller = new AbortController();
-    void getOfficeFeed(controller.signal).then(raw => { const feed = parseSnapshot(raw); setRemoteFeed({ items: feed.items, sources: feed.sources }); }).catch(() => { /* The supplied cached public snapshot is still usable. */ });
+    void getOfficeFeed(controller.signal).then(raw => { const feed = parseSnapshot(raw); setRemoteFeed({ items: feed.items, sources: feed.sources }); }).catch(() => { if (!controller.signal.aborted) setMaterialError('新闻资料暂时无法载入，可以继续普通聊天，或稍后刷新资料。'); });
     try { setRestoreTicket(sessionStorage.getItem(currentKey) || ''); } catch { /* No stored session. */ }
     return () => { controller.abort(); abort.current?.abort(); };
   }, [standalone]);
@@ -112,15 +123,18 @@ export default function AiOffice({ items, sources, watchSymbols = [], notes = []
   function updateAssignment(index: number, field: 'title' | 'instruction' | 'provider', value: string) { setDraft(current => current ? { ...current, assignments: current.assignments.map((row, i) => i === index ? { ...row, [field]: value } : row) } : null); }
   const plannedCalls = draft ? 1 + draft.assignments.length + (draft.reviewer ? 1 : 0) + 1 : 0;
   const activeStep = busy === 'working' && session ? session.steps[session.nextStep] : null;
-  return <div className="ai-office">
-    <header className="office-intro"><div><span className="office-eyebrow"><Coffee size={14} /> OUR LITTLE STUDIO</span><h1>有问题，就叫大家来聊。</h1><p>工作、学习，或者一个临时冒出的念头。让小队自己拟定分工，你来决定什么时候开工。</p></div><span className="office-door-sign"><span />{standalone ? '你的私密办公室' : '一起，把事情做出来'}</span></header>
+  return <div className={'ai-office' + (standalone ? ' mode-' + mode : '')}>
+    <header className="office-intro"><div><span className="office-eyebrow"><Coffee size={14} /> OUR LITTLE STUDIO</span><h1>{standalone && mode === 'chat' ? '想到什么，就接着聊。' : '有问题，就叫大家来聊。'}</h1><p>{standalone && mode === 'chat' ? '保留上下文，随时追问。工作、日常、新闻和自选动态，都可以在同一段对话里继续。' : '工作、学习，或者一个临时冒出的念头。让小队自己拟定分工，你来决定什么时候开工。'}</p></div><span className="office-door-sign"><span />{standalone ? '你的私密办公室' : '一起，把事情做出来'}</span></header>
     <div className="office-roster">{OFFICE_ROSTER.map(member => { const available = configured.includes(member.id); const working = busy === 'planning' ? convener === member.id : activeStep?.provider === member.id; const duties = (session?.plan?.assignments || []).filter(row => row.provider === member.id).map(row => row.title); return <article key={member.id} className={'office-member ' + (working ? 'is-working' : '')} style={{ '--member-color': member.color } as CSSProperties}>
       <div className="office-member-portrait" style={{ backgroundImage: `url(${import.meta.env.BASE_URL}art/agents-team.webp)`, backgroundPosition: member.portrait }}><span>{member.nickname}</span><small>{working ? <><LoaderCircle className="spin" size={11} />正在回应</> : standalone ? available ? <><span className="office-presence" />可参与</> : '尚未接入' : '虚拟协作伙伴'}</small></div>
       <div className="office-member-copy"><h2>{member.nickname}<span>{member.name}</span></h2><p>{member.personality}</p><small>{working ? busy === 'planning' ? '本次：召集人正在拟定分工' : '本次：' + activeStep?.title : duties.length ? '本次：' + duties.join('、') : '每次任务，由小队重新分工'}</small></div>
     </article>; })}</div>
-    {!standalone && <section className="office-private-gate"><ShieldCheck size={24} /><div><h2>把讨论留在自己的空间里</h2><p>真实模型调用在私密办公室运行。新闻网站继续公开访问，API 密钥与工作资料由私密服务处理。</p></div>{officeLink ? <a className="button primary" href={officeLink} target="_blank" rel="noopener noreferrer">打开我的私密办公室 <ArrowUpRight size={16} /></a> : <span className="status-pill warning">私密服务待连接</span>}</section>}
+    {!standalone && <section className="office-private-gate"><ShieldCheck size={24} /><div><h2>把讨论留在自己的空间里</h2><p>打开私密办公室即可连续聊天、追问新闻视频和自选动态，也保留小队协作。API 密钥与工作资料由私密服务处理。</p></div>{officeLink ? <a className="button primary" href={officeLink} target="_blank" rel="noopener noreferrer">打开我的私密办公室 <ArrowUpRight size={16} /></a> : <span className="status-pill warning">私密服务待连接</span>}</section>}
     {standalone && !statusLoading && !status?.ready && <section className="office-service-state" role="status"><CircleHelp size={19} /><div><strong>小队还在等待接入</strong><p>{error || (status?.providers.some(member => member.configured) ? '模型已配置，办公室存储或会话配置还需完成。' : '先在私密管理入口配置至少一个模型的密钥。这里不会收集或保存浏览器里的 API 密钥。')}</p></div><button className="button" onClick={() => void refreshStatus()}><RefreshCw size={14} />检查连接</button></section>}
     {standalone && <OfficeConnections status={status} onConnected={refreshStatus} disabled={Boolean(busy)} />}
+    {standalone && <nav className="office-mode-switch" aria-label="办公室使用方式"><button type="button" className={mode === 'chat' ? 'selected' : ''} aria-pressed={mode === 'chat'} onClick={() => setMode('chat')}><MessageCircle size={15} />连续对话</button><button type="button" className={mode === 'team' ? 'selected' : ''} aria-pressed={mode === 'team'} onClick={() => setMode('team')}><Users size={15} />小队协作</button><span>{mode === 'chat' ? '每条消息一次回复，可以一直追问' : '保留原有的分工、审阅和汇总流程'}</span></nav>}
+    {standalone && <div hidden={mode !== 'chat'}><OfficeChat status={status} items={visibleItems} sources={visibleSources} watchSymbols={watchSymbols} onOpen={onOpen} onStatusRefresh={refreshStatus} onRefreshMaterials={refreshMaterials} refreshingMaterials={refreshingMaterials} materialError={materialError} /></div>}
+    <div hidden={standalone && mode !== 'team'}>
     {standalone && restoreTicket && !session && <div className="office-restore"><span>这个标签页还有一项未查看的工作。</span><button className="text-button" onClick={() => void recover()}>恢复工作状态 <ArrowRight size={14} /></button></div>}
     <div className="office-workspace"><section className="office-brief"><div className="office-section-label"><MessageCircle size={16} /><h2>今天，想一起做什么？</h2></div><form onSubmit={event => void prepare(event)}>
       <div className="office-template-tabs">{templates.map(row => <button key={row.id} type="button" disabled={locked || !standalone} className={template === row.id ? 'selected' : ''} onClick={() => selectTemplate(row.id)}>{row.label}</button>)}</div>
@@ -136,6 +150,7 @@ export default function AiOffice({ items, sources, watchSymbols = [], notes = []
     {busy && <div className="office-working-status" role="status"><LoaderCircle className="spin" size={15} /><span>{busy === 'planning' ? `${providerName(convener)} 正在拟定本次分工` : busy === 'recovering' ? '正在恢复工作记录' : activeStep ? `${providerName(activeStep.provider)} · ${activeStep.title}` : '正在提交已确认的分工'}</span><button className="text-button" onClick={() => void stop()}><Square size={12} />停止后续工作</button></div>}
     {session?.status === 'draft' && draft && <section className="office-plan"><header><div><span className="office-eyebrow">PROPOSED BY YOUR TEAM</span><h2>这是小队拟定的分工</h2><p>可以换成员、改任务，再决定是否开工。模型身份与本次职责分别展示。</p></div><span className={'office-call-count ' + (plannedCalls > session.maxCalls ? 'over-limit' : '')}>共 {plannedCalls} / {session.maxCalls} 次调用，含已完成的分工</span></header><label className="office-plan-name">任务名称<input value={draft.title} maxLength={100} onChange={event => setDraft({ ...draft, title: event.target.value })} /></label><div className="office-assignments">{draft.assignments.map((row, index) => <article key={row.id}><div><span className="office-assignment-number">{String(index + 1).padStart(2, '0')}</span><input aria-label={'子任务 ' + (index + 1) + ' 标题'} value={row.title} maxLength={60} onChange={event => updateAssignment(index, 'title', event.target.value)} /><select aria-label={'子任务 ' + (index + 1) + ' 成员'} value={row.provider} onChange={event => updateAssignment(index, 'provider', event.target.value)}>{members.map(id => <option key={id} value={id}>{providerName(id)}</option>)}</select><button className="icon-button" aria-label={'移除子任务 ' + (index + 1)} disabled={draft.assignments.length === 1} onClick={() => setDraft({ ...draft, assignments: draft.assignments.filter((_, i) => i !== index) })}><Trash2 size={14} /></button></div><textarea rows={3} aria-label={'子任务 ' + (index + 1) + ' 交付要求'} value={row.instruction} maxLength={800} onChange={event => updateAssignment(index, 'instruction', event.target.value)} /></article>)}</div><div className="office-plan-actions"><button className="button" disabled={draft.assignments.length >= 3} onClick={() => setDraft({ ...draft, assignments: [...draft.assignments, { id: 'added-' + Date.now(), provider: members[0], title: '补充任务', instruction: '' }] })}><Plus size={14} />补充分工</button><label>独立审阅<select value={draft.reviewer || ''} onChange={event => setDraft({ ...draft, reviewer: event.target.value as OfficeProviderId || null })}><option value="">本次不单独审阅</option>{members.map(id => <option key={id} value={id}>{providerName(id)}</option>)}</select></label><label>最终汇总<select value={draft.summarizer} onChange={event => setDraft({ ...draft, summarizer: event.target.value as OfficeProviderId })}>{members.map(id => <option key={id} value={id}>{providerName(id)}</option>)}</select></label></div><footer><span>确认后将按以上分工自动执行；失败即停止，可随时停止后续步骤。</span><button className="button primary" disabled={Boolean(busy) || plannedCalls > session.maxCalls || draft.assignments.some(row => !row.instruction.trim())} onClick={() => void execute(true)}><Check size={16} />确认分工，开始协作</button></footer></section>}
     {session && <section className="office-deliveries"><header><div><span className="office-eyebrow">REAL WORK, VISIBLE HANDOFFS</span><h2>{session.title}</h2></div><div><span>{session.usedCalls} / {session.maxCalls} 次调用</span>{!busy && <button className="button" onClick={() => void recover()}><RefreshCw size={13} />恢复状态</button>}</div></header>{session.results.length ? <div className="office-discussion">{session.results.map(reply => <Reply key={reply.id} reply={reply} items={visibleItems} onOpen={onOpen} />)}</div> : <div className="office-no-results"><Users size={24} /><p>{session.status === 'draft' ? '分工已拟定。等你确认后，这里才会出现真实成员回复。' : '成员还没有交付。本页不会填充模拟讨论。'}</p></div>}{session.error && <p className="office-inline-error">{session.error}</p>}<footer><span>{session.status === 'completed' ? '本次协作已完成' : session.status === 'cancelled' ? '后续工作已停止' : session.status === 'failed' ? '本次协作已停止，保留已交付内容' : session.status === 'ready' && !busy ? '已恢复到可继续的步骤' : session.status === 'draft' ? '等待你的分工确认' : '正在处理'} · 服务端记录临时保留一小时</span><div>{session.status === 'ready' && !busy && <button className="button primary" onClick={() => void execute(false)}>继续已确认的分工 <ArrowRight size={14} /></button>}{session.results.length > 0 && <button className="button" onClick={() => exportText(session.title + '.md', '# ' + session.title + '\n\n' + session.results.map(reply => '## ' + reply.title + ' · ' + providerName(reply.provider) + '\n\n' + reply.text).join('\n\n'))}><Download size={14} />导出工作记录</button>}{!busy && <button className="button" onClick={newTask}><Plus size={14} />开一项新任务</button>}</div></footer></section>}
+    </div>
     <div className="office-bottom-note"><ShieldCheck size={14} /><p>回复来自实际调用的模型，观点仍需你判断。平台版本、地区、账户额度与网络会影响可用性；没有接入的成员不会被另一个模型代扮。</p></div>
   </div>;
 }

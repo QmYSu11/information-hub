@@ -2,13 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
-import { createOfficeWorker, normalizeContext, normalizePlan, safeCitations } from '../worker.mjs';
+import { createOfficeWorker, normalizeContext, normalizePlan, safeCitations, selectChatContext } from '../worker.mjs';
 
 function environment() {
   const sqlite = new DatabaseSync(':memory:');
   sqlite.exec(readFileSync(new URL('../migrations/0001_office.sql', import.meta.url), 'utf8'));
   sqlite.exec(readFileSync(new URL('../migrations/0002_provider_keys.sql', import.meta.url), 'utf8'));
-  const DB = { prepare(sql) { return { bind(...values) { return { async first() { return sqlite.prepare(sql).get(...values) || null; }, async all() { return { results: sqlite.prepare(sql).all(...values) }; }, async run() { return { meta: { changes: Number(sqlite.prepare(sql).run(...values).changes) } }; } }; } }; } };
+  sqlite.exec(readFileSync(new URL('../migrations/0003_chat.sql', import.meta.url), 'utf8'));
+  const DB = { prepare(sql) { return { bind(...values) { return { _sql: sql, _values: values, async first() { return sqlite.prepare(sql).get(...values) || null; }, async all() { return { results: sqlite.prepare(sql).all(...values) }; }, async run() { return { meta: { changes: Number(sqlite.prepare(sql).run(...values).changes) } }; } }; } }; }, async batch(statements) { sqlite.exec('BEGIN'); try { const result = statements.map(statement => ({ meta: { changes: Number(sqlite.prepare(statement._sql).run(...statement._values).changes) } })); sqlite.exec('COMMIT'); return result; } catch (error) { sqlite.exec('ROLLBACK'); throw error; } } };
   return { DB, OFFICE_SESSION_SECRET: 'test-session-signing-key-not-a-real-secret-long-enough', DEEPSEEK_API_KEY: 'test-deepseek-key', OFFICE_DAILY_CALL_LIMIT: '20' };
 }
 const request = (path, body, origin = 'https://private.example') => new Request('https://private.example' + path, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin, 'oai-authenticated-user-id': 'test-owner-id' }, body: JSON.stringify(body) });
@@ -250,4 +251,143 @@ test('configuration rejects anonymous, cross-site, mismatched provider and heade
   assert.equal((await worker.fetch(request('/api/providers/configure', { provider: 'gemini', key: 'a-test-provider-secret', configurationToken: intent.configurationToken }), env)).status, 403);
   assert.equal((await worker.fetch(request('/api/providers/configure', { provider: 'deepseek', key: 'a-test-key\r\nInjected: evil', configurationToken: intent.configurationToken }), env)).status, 400);
   assert.equal((await env.DB.prepare('SELECT count(*) AS count FROM office_provider_keys WHERE owner_id = ?').bind('test-owner-id').first()).count, 0);
+});
+
+const chatRequest = body => request('/api/chat/send', { requestId: crypto.randomUUID(), provider: 'deepseek', ...body });
+const chatGet = (path, owner = 'test-owner-id') => new Request('https://private.example' + path, { headers: { 'oai-authenticated-user-id': owner } });
+function modelReply(provider, text) {
+  if (provider === 'openai') return new Response(JSON.stringify({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text }] }], usage: { input_tokens: 5, output_tokens: 3 } }));
+  if (provider === 'gemini') return new Response(JSON.stringify({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text }] } }], usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 3 } }));
+  return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: text } }], usage: { prompt_tokens: 5, completion_tokens: 3 } }));
+}
+
+test('continuous chat carries real user/assistant history in each provider protocol and survives refresh without extra calls', async () => {
+  for (const provider of ['deepseek', 'openai', 'gemini']) {
+    const env = environment(); env.OPENAI_API_KEY = 'test-openai-key'; env.GEMINI_API_KEY = 'test-gemini-key';
+    let calls = 0;
+    const worker = createOfficeWorker(async (url, init) => {
+      calls++; assert.ok(!url.includes('snapshot'));
+      const payload = JSON.parse(init.body);
+      const history = provider === 'deepseek' ? payload.messages.slice(1) : provider === 'openai' ? payload.input : payload.contents;
+      assert.equal(history.length, calls === 1 ? 1 : 3);
+      assert.equal(history[0].role, 'user');
+      if (calls === 2) {
+        assert.equal(history[1].role, provider === 'gemini' ? 'model' : 'assistant');
+        assert.match(JSON.stringify(history[0]), /我的名字是小林/);
+        assert.match(JSON.stringify(history[1]), /第一轮已记住/);
+        assert.match(JSON.stringify(history[2]), /我叫什么/);
+      }
+      return modelReply(provider, calls === 1 ? '第一轮已记住。' : '你叫小林。');
+    });
+    const first = await read(await worker.fetch(chatRequest({ provider, message: '我的名字是小林' }), env));
+    assert.equal(first.status, 200); assert.equal(first.body.messages.length, 2); assert.equal(first.body.contextMessageCount, 1);
+    assert.deepEqual(first.body.messages[0].materials, []); assert.deepEqual(first.body.messages[0].watchSymbols, []);
+    const second = await read(await worker.fetch(chatRequest({ provider, message: '我叫什么？', conversationId: first.body.id }), env));
+    assert.equal(second.status, 200); assert.equal(second.body.messages.length, 4); assert.equal(second.body.contextMessageCount, 3); assert.equal(second.body.usedCalls, 2);
+    const refreshed = await read(await worker.fetch(chatGet('/api/chat/conversations/' + first.body.id), env));
+    assert.equal(refreshed.body.messages[3].text, '你叫小林。'); assert.equal(refreshed.body.contextMessageCount, 3); assert.equal(calls, 2);
+    assert.ok(Number.isFinite(Date.parse(refreshed.body.updatedAt))); assert.ok(Number.isFinite(Date.parse(refreshed.body.messages[0].createdAt)));
+    const listed = await read(await worker.fetch(chatGet('/api/chat/conversations'), env));
+    assert.equal(listed.body.conversations.length, 1); assert.equal(listed.body.conversations[0].provider, provider);
+  }
+});
+
+test('chat request IDs are idempotent, content-bound, owner-scoped and never transfer old history to another provider', async () => {
+  const env = environment(); env.OPENAI_API_KEY = 'test-openai-key'; let calls = 0;
+  const worker = createOfficeWorker(async () => { calls++; return modelReply('deepseek', '已收到。'); });
+  const requestId = crypto.randomUUID(); const body = { provider: 'deepseek', requestId, message: '一条明确消息' };
+  const first = (await read(await worker.fetch(request('/api/chat/send', body), env))).body;
+  const replay = await read(await worker.fetch(request('/api/chat/send', body), env));
+  assert.equal(replay.status, 200); assert.equal(replay.body.id, first.id); assert.equal(calls, 1); assert.equal(replay.body.usedCalls, 1);
+  assert.equal((await worker.fetch(request('/api/chat/send', { ...body, requestId: requestId.toUpperCase() }), env)).status, 200); assert.equal(calls, 1);
+  assert.equal((await worker.fetch(request('/api/chat/send', { ...body, message: '改写同一编号的消息' }), env)).status, 409);
+  assert.equal((await worker.fetch(chatRequest({ conversationId: first.id, provider: 'openai', message: '把旧历史转给另一个品牌' }), env)).status, 409);
+  assert.equal((await worker.fetch(chatGet('/api/chat/conversations/' + first.id, 'another-owner'), env)).status, 404);
+  const wrongOwner = chatRequest({ conversationId: first.id, message: '不能访问' }); wrongOwner.headers.set('oai-authenticated-user-id', 'another-owner');
+  assert.equal((await worker.fetch(wrongOwner, env)).status, 404);
+  assert.equal((await worker.fetch(request('/api/chat/send', { ...body, requestId: 'not-a-uuid' }), env)).status, 400);
+  const crossSite = chatRequest({ message: '跨站消息' }); crossSite.headers.set('Origin', 'https://evil.example');
+  assert.equal((await worker.fetch(crossSite, env)).status, 403); assert.equal(calls, 1);
+});
+
+test('a failed chat returns its conversation ID, never retries the same request, and allows a new message without failed history', async () => {
+  const env = environment(); let calls = 0;
+  const worker = createOfficeWorker(async (url, init) => {
+    calls++;
+    if (calls === 1) return new Response(JSON.stringify({ error: { code: 'rate_limit_exceeded', message: 'never-echo-secret' } }), { status: 429 });
+    const history = JSON.parse(init.body).messages.slice(1);
+    assert.equal(history.length, 1); assert.match(history[0].content, /换个问题/); assert.ok(!history[0].content.includes('失败尝试'));
+    return modelReply('deepseek', '新的问题可以继续。');
+  }, () => {});
+  const body = { provider: 'deepseek', requestId: crypto.randomUUID(), message: '失败尝试' };
+  const failed = await read(await worker.fetch(request('/api/chat/send', body), env));
+  assert.equal(failed.status, 502); assert.ok(failed.body.conversationId); assert.ok(!JSON.stringify(failed).includes('never-echo-secret'));
+  const replay = await read(await worker.fetch(request('/api/chat/send', body), env));
+  assert.equal(replay.status, 502); assert.equal(replay.body.conversationId, failed.body.conversationId); assert.equal(calls, 1);
+  const next = await read(await worker.fetch(chatRequest({ conversationId: failed.body.conversationId, message: '换个问题' }), env));
+  assert.equal(next.status, 200); assert.equal(calls, 2); assert.equal(next.body.messages.length, 3); assert.equal(next.body.messages[0].deliveryStatus, 'failed'); assert.equal(next.body.pending, false);
+});
+
+test('a conversation has one atomic active request, and a late expired response cannot overwrite a newer turn or lock', async () => {
+  const env = environment(); let calls = 0; let finishFirst; let started;
+  const waiting = new Promise(resolve => { started = resolve; });
+  const worker = createOfficeWorker(async () => {
+    calls++;
+    if (calls === 1) { started(); return new Promise(resolve => { finishFirst = () => resolve(modelReply('deepseek', '迟到的旧回复')); }); }
+    return modelReply('deepseek', '新一轮正常回复');
+  });
+  const firstRequest = chatRequest({ message: '第一条正在等待' });
+  const firstRun = worker.fetch(firstRequest, env); await waiting;
+  const listed = (await read(await worker.fetch(chatGet('/api/chat/conversations'), env))).body;
+  const id = listed.conversations[0].id;
+  const pending = await read(await worker.fetch(chatGet('/api/chat/conversations/' + id), env));
+  assert.equal(pending.body.pending, true);
+  const busy = await read(await worker.fetch(chatRequest({ conversationId: id, message: '不能并发发送' }), env));
+  assert.equal(busy.status, 409); assert.equal(busy.body.conversationId, id); assert.equal(calls, 1);
+  await env.DB.prepare('UPDATE office_chat_conversations SET lock_until = ? WHERE id = ?').bind(Date.now() - 100, id).run();
+  const newer = await read(await worker.fetch(chatRequest({ conversationId: id, message: '过期后继续的新一轮' }), env));
+  assert.equal(newer.status, 200); assert.equal(calls, 2);
+  finishFirst();
+  assert.equal((await firstRun).status, 409);
+  const final = (await read(await worker.fetch(chatGet('/api/chat/conversations/' + id), env))).body;
+  assert.equal(final.messages.at(-1).text, '新一轮正常回复'); assert.equal(final.pending, false);
+  assert.ok(!JSON.stringify(final).includes('迟到的旧回复'));
+});
+
+test('news attachments are mapped from the real snapshot by ID, persisted, and cited from actual historical context', async () => {
+  const env = environment(); let modelCalls = 0; let feedCalls = 0;
+  const feed = { sources: [{ id: 'source', label: '测试真实来源' }], items: [{ id: 'news-one', sourceId: 'source', title: '真实来源标题', description: '短摘要', url: 'https://example.com/original', fetchedAt: '2026-11-12T00:00:00Z', channel: '科技', kind: 'article' }] };
+  const worker = createOfficeWorker(async (url, init) => {
+    if (url.includes('snapshot.json')) { feedCalls++; return new Response(JSON.stringify(feed)); }
+    modelCalls++;
+    const history = JSON.parse(init.body).messages.slice(1);
+    assert.match(JSON.stringify(history), /真实来源标题/); assert.ok(!JSON.stringify(history).includes('evil.example')); assert.ok(!JSON.stringify(history).includes('https://example.com/original'));
+    return modelReply('deepseek', '这条值得看[来源:news-one]，未知来源不引用[来源:invented]');
+  });
+  const first = (await read(await worker.fetch(chatRequest({ message: '挑一条有趣内容', intent: 'curation', materials: [{ id: 'news-one', title: '伪造客户端标题', url: 'https://evil.example' }] }), env))).body;
+  assert.equal(first.messages[0].materials[0].title, '真实来源标题'); assert.equal(first.messages[1].references[0].url, 'https://example.com/original'); assert.match(first.messages[1].text, /未匹配来源/);
+  const follow = (await read(await worker.fetch(chatRequest({ conversationId: first.id, message: '再解释一下它为什么有趣' }), env))).body;
+  assert.equal(feedCalls, 1); assert.equal(modelCalls, 2); assert.equal(follow.messages.at(-1).references[0].id, 'news-one');
+  const missing = await read(await worker.fetch(chatRequest({ conversationId: first.id, message: '不存在的材料', materials: [{ id: 'missing', url: 'https://evil.example' }] }), env));
+  assert.equal(missing.status, 409); assert.equal(missing.body.conversationId, first.id); assert.equal(modelCalls, 2);
+});
+
+test('chat context limits count attached data while archive and daily limits reject instead of deleting history or calling again', async () => {
+  const rows = Array.from({ length: 30 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', text: 'x'.repeat(1800), materials: [], watchSymbols: [], intent: 'general' }));
+  rows.push({ role: 'user', text: '最新问题', intent: 'curation', materials: [{ id: 'item', title: '附料'.repeat(900) }] });
+  const context = selectChatContext(rows);
+  assert.ok(context.history.length <= 20); assert.ok(context.history.reduce((sum, row) => sum + row.content.length, 0) <= 24_000); assert.equal(context.history[0].role, 'user'); assert.equal(context.limited, true);
+  const env = environment(); env.OFFICE_DAILY_CALL_LIMIT = '1'; let calls = 0;
+  const worker = createOfficeWorker(async () => { calls++; return modelReply('deepseek', '已回复。'); });
+  const first = (await read(await worker.fetch(chatRequest({ message: '正常第一条' }), env))).body;
+  const denied = await read(await worker.fetch(chatRequest({ conversationId: first.id, message: '日预算不足时不调用模型' }), env));
+  assert.equal(denied.status, 429); assert.equal(denied.body.conversationId, first.id); assert.equal(calls, 1);
+  const saved = (await read(await worker.fetch(chatGet('/api/chat/conversations/' + first.id), env))).body;
+  assert.equal(saved.messages.length, 3); assert.equal(saved.messages[2].deliveryStatus, 'failed');
+  await env.DB.prepare('UPDATE office_chat_messages SET text = ? WHERE id = ?').bind('x'.repeat(239_000), saved.messages[0].id).run();
+  const tooLarge = await read(await worker.fetch(chatRequest({ conversationId: first.id, message: '不能静默删除旧记录' }), env));
+  assert.equal(tooLarge.status, 413); assert.equal(calls, 1);
+  assert.equal((await env.DB.prepare('SELECT length(text) AS length FROM office_chat_messages WHERE id = ?').bind(saved.messages[0].id).first()).length, 239_000);
+  await env.DB.prepare('UPDATE office_chat_conversations SET expires_at = ? WHERE id = ?').bind(Date.now() - 1, first.id).run();
+  assert.equal((await worker.fetch(chatGet('/api/chat/conversations/' + first.id), env)).status, 404);
 });
