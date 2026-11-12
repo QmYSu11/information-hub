@@ -94,6 +94,7 @@ test('OpenAI and Gemini use their official endpoints, secret headers and bounded
       const plan = JSON.stringify({ assignments: [{ provider, instruction: '处理任务' }], summarizer: provider });
       if (provider === 'openai') {
         assert.equal(url, 'https://api.openai.com/v1/responses'); assert.equal(init.headers.Authorization, 'Bearer test-provider-secret'); assert.equal(payload.store, false); assert.equal(payload.max_output_tokens, 1500);
+        assert.equal(payload.text.format.type, 'json_object'); assert.match(payload.input, /JSON/); assert.match(payload.input, /一个通用任务/);
         return new Response(JSON.stringify({ status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: plan }] }], usage: { input_tokens: 20, output_tokens: 10 } }));
       }
       assert.ok(url.startsWith('https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent')); assert.equal(init.headers['x-goog-api-key'], 'test-provider-secret'); assert.ok(!url.includes('test-provider-secret')); assert.equal(payload.generationConfig.maxOutputTokens, 1500);
@@ -103,6 +104,56 @@ test('OpenAI and Gemini use their official endpoints, secret headers and bounded
     assert.equal(result.status, 200); assert.equal(result.body.plan.assignments[0].provider, provider);
     const status = await read(await worker.fetch(new Request('https://private.example/api/status', { headers: { 'oai-authenticated-user-id': 'test-owner-id' } }), env));
     assert.ok(!JSON.stringify(status).includes('test-provider-secret'));
+  }
+});
+
+test('provider HTTP failures expose only allowlisted diagnostics and distinguish exhausted quota from ordinary rate limiting', async () => {
+  const cases = [
+    { status: 401, error: { code: 'invalid_api_key', type: 'invalid_request_error' }, category: 'authentication', code: 'invalid_api_key', param: null },
+    { status: 429, error: { code: 'insufficient_quota', type: 'insufficient_quota' }, category: 'insufficient_quota', code: 'insufficient_quota', param: null },
+    { status: 429, error: { code: 'rate_limit_exceeded', type: 'tokens' }, category: 'rate_limit', code: 'rate_limit_exceeded', param: null },
+    { status: 404, error: { code: 'model_not_found', param: 'model' }, category: 'model_access', code: 'model_not_found', param: 'model' },
+    { status: 400, error: { code: 'unsupported_parameter', type: 'invalid_request_error', param: 'text.format' }, category: 'invalid_request', code: 'unsupported_parameter', param: 'text.format' },
+    { status: 403, error: { code: 'unsupported_country_region_territory' }, category: 'region_access', code: 'unsupported_country_region_territory', param: null },
+    { status: 503, error: { code: 'service_unavailable', type: 'server_error' }, category: 'service', code: 'service_unavailable', param: null },
+    { status: 429, error: { code: 'never-echo-provider-secret', type: 'never-echo-provider-secret', param: 'never-echo-provider-secret' }, category: 'quota_or_rate_limit', code: null, param: null },
+    { status: 429, error: { status: 'RESOURCE_EXHAUSTED', details: [{ reason: 'QUOTA_EXCEEDED', metadata: { key: 'never-echo-provider-secret' } }] }, category: 'quota_or_rate_limit', code: 'QUOTA_EXCEEDED', param: null },
+    { status: 429, error: { status: 'RESOURCE_EXHAUSTED', details: [{ reason: 'RATE_LIMIT_EXCEEDED' }] }, category: 'rate_limit', code: 'RATE_LIMIT_EXCEEDED', param: null },
+    { status: 429, error: { type: 'invalid_request_error' }, category: 'quota_or_rate_limit', code: null, param: null },
+    { status: 404, error: { type: 'invalid_request_error' }, category: 'not_found', code: null, param: null },
+    { status: 503, error: { type: 'invalid_request_error' }, category: 'service', code: null, param: null },
+  ];
+  for (const fixture of cases) {
+    const env = environment(); delete env.DEEPSEEK_API_KEY; env.OPENAI_API_KEY = 'test-openai-secret';
+    let calls = 0; const logs = [];
+    const worker = createOfficeWorker(async () => { calls++; return new Response(JSON.stringify({ error: { ...fixture.error, message: 'never-echo-provider-secret', request: { authorization: 'never-echo-provider-secret' } } }), { status: fixture.status, headers: { 'x-debug-private': 'never-echo-provider-secret' } }); }, value => logs.push(value));
+    const result = await read(await worker.fetch(request('/api/office/plan', { task: '诊断测试', maxCalls: 3 }), env));
+    assert.equal(calls, 1); assert.equal(result.status, 502);
+    assert.equal(result.body.diagnostic.httpStatus, fixture.status);
+    assert.equal(result.body.diagnostic.category, fixture.category);
+    assert.equal(result.body.diagnostic.code, fixture.code);
+    assert.equal(result.body.diagnostic.param, fixture.param);
+    assert.match(result.body.error, new RegExp('HTTP ' + fixture.status));
+    assert.deepEqual(logs, [result.body.diagnostic]);
+    assert.ok(!JSON.stringify({ result, logs }).includes('never-echo-provider-secret'));
+    assert.ok(!JSON.stringify({ result, logs }).includes('test-openai-secret'));
+    assert.deepEqual(Object.keys(logs[0]).sort(), ['provider', 'httpStatus', 'category', 'code', 'type', 'param'].sort());
+  }
+});
+
+test('non-JSON errors and transport failures remain diagnosable without reading them as authentication or echoing content', async () => {
+  const env = environment();
+  for (const fixture of [
+    { fetch: async () => new Response('<html>never-echo-provider-secret</html>', { status: 403 }), category: 'permission', httpStatus: 403 },
+    { fetch: async () => new Response('{"error":', { status: 400 }), category: 'invalid_request', httpStatus: 400 },
+    { fetch: async () => { throw new TypeError('never-echo-provider-secret'); }, category: 'transport', httpStatus: null },
+  ]) {
+    const logs = [];
+    const worker = createOfficeWorker(fixture.fetch, value => logs.push(value));
+    const result = await read(await worker.fetch(request('/api/office/plan', { task: '网络诊断测试' }), env));
+    assert.equal(result.status, 502); assert.equal(result.body.diagnostic.category, fixture.category); assert.equal(result.body.diagnostic.httpStatus, fixture.httpStatus);
+    assert.ok(!JSON.stringify({ result, logs }).includes('never-echo-provider-secret'));
+    assert.equal(logs.length, 1);
   }
 });
 
