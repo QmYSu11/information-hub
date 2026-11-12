@@ -1,5 +1,5 @@
 export type Channel = '国内' | '国际' | '科技' | '趣事' | '财经';
-export type Platform = 'bilibili' | 'weibo' | 'xiaohongshu';
+export type Platform = 'bilibili' | 'weibo' | 'xiaohongshu' | 'twitter' | 'tieba' | 'zhihu';
 export interface ContentItem {
   id: string;
   sourceId: string;
@@ -29,6 +29,8 @@ export interface Source {
   status: 'ok' | 'cached' | 'unavailable' | 'external';
   lastSuccessAt: string | null;
   lastAttemptAt?: string;
+  upstreamUpdatedAt?: string;
+  region?: string;
   message?: string;
   attribution?: string;
 }

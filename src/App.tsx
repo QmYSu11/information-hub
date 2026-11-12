@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUpRight, Bell, BookMarked, Bookmark, BookOpen, Check, ChevronDown, Clock3, ExternalLink, Flame, Gamepad2, Globe2, LayoutGrid, ListFilter, LoaderCircle, Maximize2, Menu, Moon, Newspaper, PanelLeftClose, Play, Plus, RefreshCw, Search, Settings2, Sparkles, Sun, TrendingUp, X } from 'lucide-react';
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUpRight, Bell, BookMarked, Bookmark, BookOpen, Check, ChevronDown, Clock3, ExternalLink, Flame, Gamepad2, Globe2, LayoutGrid, ListFilter, LoaderCircle, Maximize2, Menu, Moon, Newspaper, Orbit, PanelLeftClose, Play, Plus, RefreshCw, Search, Settings2, Sparkles, Sun, TrendingUp, Users, X } from 'lucide-react';
 import DOMPurify from 'dompurify';
 import type { Channel, ContentItem, Platform, Snapshot, Source } from './types';
 import { fullTime, parseSnapshot, plain, relativeTime, safeUrl, sourceState } from './lib/feed';
@@ -11,15 +11,47 @@ import FeatureBoundary from './components/FeatureBoundary';
 const Game = lazy(() => import('./features/Game'));
 const Recommendations = lazy(() => import('./features/Recommendations'));
 const MarketWidget = lazy(() => import('./features/MarketWidget'));
+const HotwordRadar = lazy(() => import('./features/HotwordRadar'));
+const AiOffice = lazy(() => import('./features/AiOffice'));
 
-type Page = 'today' | 'news' | 'trends' | 'markets' | 'library' | 'notes' | 'reminders' | 'settings' | 'game';
-const pageNames: Record<Page, string> = { today: '今日', news: '新闻', trends: '热榜', markets: '财经', library: '收藏与稍后读', notes: '笔记', reminders: '提醒', settings: '偏好设置', game: '信号远征' };
-const nav = [{ id: 'today', icon: LayoutGrid, name: '今日' }, { id: 'news', icon: Newspaper, name: '新闻' }, { id: 'trends', icon: Flame, name: '热榜' }, { id: 'markets', icon: TrendingUp, name: '财经' }, { id: 'notes', icon: BookOpen, name: '笔记' }, { id: 'game', icon: Gamepad2, name: '休息室' }] as const;
+type Page = 'today' | 'news' | 'trends' | 'radar' | 'markets' | 'office' | 'library' | 'notes' | 'reminders' | 'settings' | 'game';
+const pageNames: Record<Page, string> = { today: '今日', news: '新闻', trends: '热榜', radar: '热点星图', markets: '财经', office: 'AI 办公室', library: '收藏与稍后读', notes: '笔记', reminders: '提醒', settings: '偏好设置', game: '信号远征' };
+const nav = [{ id: 'today', icon: LayoutGrid, name: '今日' }, { id: 'news', icon: Newspaper, name: '新闻' }, { id: 'trends', icon: Flame, name: '热榜' }, { id: 'radar', icon: Orbit, name: '热点星图' }, { id: 'markets', icon: TrendingUp, name: '财经' }, { id: 'office', icon: Users, name: 'AI 办公室' }, { id: 'notes', icon: BookOpen, name: '笔记' }, { id: 'game', icon: Gamepad2, name: '休息室' }] as const;
+const mobilePages: Page[] = ['today', 'trends', 'markets', 'notes'];
 const platforms: { id: Platform; name: string; short: string; url: string; subtitle: string }[] = [
   { id: 'bilibili', name: '哔哩哔哩', short: 'B', url: 'https://www.bilibili.com/v/popular/rank/all', subtitle: '热门视频与创作' },
   { id: 'weibo', name: '微博', short: '微', url: 'https://s.weibo.com/top/summary', subtitle: '此刻正在讨论' },
   { id: 'xiaohongshu', name: '小红书', short: '红', url: 'https://www.xiaohongshu.com/explore', subtitle: '推荐帖子 · 发现生活' },
+  { id: 'twitter', name: 'X / Twitter', short: '𝕏', url: 'https://x.com/explore/tabs/trending', subtitle: '美国地区趋势' },
+  { id: 'tieba', name: '百度贴吧', short: '贴', url: 'https://tieba.baidu.com/', subtitle: '社区热议与脑洞' },
+  { id: 'zhihu', name: '知乎', short: '知', url: 'https://www.zhihu.com/hot', subtitle: '问题背后的另一面' },
 ];
+type BrowseInterest = 'mix' | 'video' | 'daily' | 'tech';
+const browseInterests: { id: BrowseInterest; label: string }[] = [{ id: 'mix', label: '随便逛逛' }, { id: 'video', label: '想看视频' }, { id: 'daily', label: '日常灵感' }, { id: 'tech', label: '数码与游戏' }];
+function browseCollection(items: ContentItem[], interest: BrowseInterest) {
+  const buckets = new Map<string, ContentItem[]>();
+  for (const item of items) {
+    const video = item.kind === 'video' || item.mediaType === 'video';
+    const community = item.kind === 'video' || item.kind === 'post' || item.kind === 'topic';
+    if (interest === 'mix' && !community) continue;
+    if (interest === 'video' && !video) continue;
+    if (interest === 'daily' && item.kind !== 'post' && !/日常|生活|美食|做饭|旅行|旅游|咖啡|猫|狗|宠物|穿搭|装修|摄影|手工|搞笑|整活|开箱/.test(item.title)) continue;
+    if (interest === 'tech' && item.channel !== '科技' && !/游戏|动画|动漫|数码|手机|电脑|显卡|芯片|机器人|人工智能|\bAI\b|主机|编程|英雄联盟|星穹铁道|明日方舟|原神/i.test(item.title)) continue;
+    if (!buckets.has(item.sourceId)) buckets.set(item.sourceId, []);
+    buckets.get(item.sourceId)!.push(item);
+  }
+  // Round-robin source variety; platform views and heat never become a shared score.
+  const selected: ContentItem[] = [];
+  while (selected.length < 40) {
+    let found = false;
+    for (const bucket of buckets.values()) {
+      const item = bucket.shift();
+      if (item) { selected.push(item); found = true; if (selected.length === 40) break; }
+    }
+    if (!found) break;
+  }
+  return selected;
+}
 const channels: ('全部' | Channel)[] = ['全部', '国内', '国际', '科技', '财经', '趣事'];
 function getPage(): Page {
   const id = location.hash.replace(/^#\/?/, '').split('?')[0];
@@ -109,7 +141,7 @@ function TrendPreview({ source, items, onOpen, onMore }: { source?: Source; item
   const p = platforms.find(p => p.id === source?.platform) || platforms[0];
   return <section className="trend-preview"><div className="section-heading"><h2><Flame /> 此刻热议</h2><button className="text-button" onClick={onMore}>全部 <ArrowRight size={14} /></button></div>
     <div className="trend-source"><span className={'platform-logo ' + p.id}>{p.short}</span><strong>{p.name}</strong><span className="mini-label">{source ? sourceState(source).label : '原站查看'}</span></div>
-    {items.length ? <ol className="mini-rankings">{items.slice(0, 5).map((i, index) => <li key={i.id}><span className={'rank-number rank-' + index}>{i.rank || index + 1}</span><button onClick={() => onOpen(i)}>{i.title}</button></li>)}</ol> : <div className="quiet-empty">热榜正在等待可用数据。<a href={p.url} target="_blank" rel="noopener noreferrer">去原站看看 <ArrowUpRight size={13} /></a></div>}
+    {items.length ? <ol className="mini-rankings">{items.slice(0, 5).map((i, index) => <li key={i.id}><span className={'rank-number rank-' + index}>{i.rank ?? '·'}</span><button onClick={() => onOpen(i)}>{i.title}</button></li>)}</ol> : <div className="quiet-empty">热榜正在等待可用数据。<a href={p.url} target="_blank" rel="noopener noreferrer">去原站看看 <ArrowUpRight size={13} /></a></div>}
     <div className="small-status">最近获取 · {source?.lastSuccessAt ? relativeTime(source.lastSuccessAt) : '尚未接通'}</div>
   </section>;
 }
@@ -153,6 +185,8 @@ export default function App() {
   const [visibleCount, setVisibleCount] = useState(20);
   const [now, setNow] = useState(Date.now());
   const [sourceFilter, setSourceFilter] = useState('');
+  const [browseInterest, setBrowseInterest] = useState<BrowseInterest>('daily');
+  const [browseOffset, setBrowseOffset] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const scrollPositions = useRef<Record<string, number>>({});
@@ -175,6 +209,7 @@ export default function App() {
   }, []);
   useEffect(() => { document.title = pageNames[page] + ' · 信息书房'; }, [page]);
   useEffect(() => { setVisibleCount(20); }, [page, channel, query, platform, sourceFilter, libraryTab]);
+  useEffect(() => { setBrowseOffset(0); }, [browseInterest, feed.snapshot.generationId]);
   const sources = feed.snapshot.sources;
   const sourceMap = useMemo(() => new Map(sources.map(s => [s.id, s])), [sources]);
   const favorite = (id: string, kind: 'favorite' | 'later' = 'favorite') => data.saved.some(s => s.item.id === id && s.kind === kind);
@@ -188,6 +223,9 @@ export default function App() {
   const lead = articles.find(i => i.image) || articles[0];
   const second = articles.filter(i => i.id !== lead?.id).slice(0, 2);
   const watchedInstruments = migrateWatchlist(prefs.watchlist).map(id => resolveInstrument(id, prefs.customSymbols || [])).filter((item): item is NonNullable<typeof item> => item !== null);
+  const browseItems = useMemo(() => browseCollection(visibleItems, browseInterest), [visibleItems, browseInterest]);
+  const browseStart = Math.min(browseOffset, Math.max(0, Math.floor((browseItems.length - 1) / 4) * 4));
+  const activeNotes = useMemo(() => data.notes.filter(note => !note.deletedAt).map(({ id, title, body }) => ({ id, title, body })), [data.notes]);
   const reminderCount = data.reminders.filter(r => !r.completedAt && Date.parse(r.dueAt) <= now).length;
   const dateText = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: 'long', day: 'numeric', weekday: 'long' }).format(new Date(now));
   const matched = (i: ContentItem) => (!query.trim() || (i.title + ' ' + (i.description || '')).toLowerCase().includes(query.trim().toLowerCase()));
@@ -213,8 +251,26 @@ export default function App() {
         {feed.pending && <div className="notice-bar"><span><Sparkles size={15} /> 有一批新内容，准备好再开始阅读。</span><button onClick={feed.accept}>载入更新 <ArrowDown size={14} /></button></div>}
         {query.trim() ? <><div className="page-heading"><div><span className="eyebrow">在书房里寻找</span><h1>搜索结果</h1><p>“{query}” · 当前快照与收藏中的 {searchItems.length} 条内容</p></div><button className="button" onClick={() => setQuery('')}>返回 <X size={14} /></button></div><div className="feed-list">{searchItems.length ? renderRows(searchItems) : <Empty title="暂时没有找到" text="试试更短的关键词。笔记内的文字可以在笔记页搜索。" icon={<Search />} />}</div></> :
           page === 'today' ? <>
-            <div className="page-heading today-heading"><div><div className="eyebrow"><span className="semantic-dot" /> {dateText}</div><h1>世界很大，<span>慢慢看。</span></h1><p>让信息有序，让每一次阅读有所收获。</p></div><div className="refresh-area"><button className="button" onClick={() => void feed.refresh()} disabled={feed.loading}><RefreshCw className={feed.loading ? 'spin' : ''} />{feed.loading ? '正在检查' : '刷新内容'}</button><small>{sourceCounts ? sourceCounts + ' 个来源可用 · 每 30 分钟计划更新' : '正在连接你的信息来源'}</small></div></div>
+            <div className="page-heading today-heading"><div><div className="eyebrow"><span className="semantic-dot" /> {dateText}</div><h1>先逛一会儿，<span>再看看世界。</span></h1><p>新闻、脑洞和有趣的日常，都可以有一个位置。</p></div><div className="refresh-area"><button className="button" onClick={() => void feed.refresh()} disabled={feed.loading}><RefreshCw className={feed.loading ? 'spin' : ''} />{feed.loading ? '正在检查' : '刷新内容'}</button><small>{sourceCounts ? sourceCounts + ' 个来源可用 · 新闻与社区陆续更新' : '正在连接你的信息来源'}</small></div></div>
             {feed.error && <div className="inline-notice">{feed.error}。已有内容仍可阅读。<button className="text-button" onClick={() => void feed.refresh()}>重试</button></div>}
+            <div className="today-shortcuts" aria-label="发现入口">
+              <button onClick={() => go('radar')}><span className="shortcut-icon"><Orbit size={20} /></span><span><strong>看看热点星图</strong><small>今天反复出现了哪些词？</small></span><ArrowUpRight size={15} /></button>
+              <button onClick={() => go('office')}><span className="shortcut-icon office"><Users size={20} /></span><span><strong>找 AI 小队聊聊</strong><small>工作、学习，或一个突然的念头</small></span><ArrowUpRight size={15} /></button>
+              <button onClick={() => go('trends')}><span className="shortcut-icon trends"><Flame size={20} /></span><span><strong>换个平台逛逛</strong><small>六个平台，各有各的热闹</small></span><ArrowUpRight size={15} /></button>
+            </div>
+            <section className="today-browse" aria-labelledby="browse-heading">
+              <div className="browse-heading"><div><span className="eyebrow"><Sparkles size={12} /> LEAVE ROOM FOR CURIOSITY</span><h2 id="browse-heading">逛一会儿</h2><p>从不同来源各拿一点，不用每次都那么正经。</p></div><button className="text-button" onClick={() => go('office')}>让小队帮忙挑 <ArrowRight size={14} /></button></div>
+              <div className="browse-toolbar"><div className="browse-interest-tabs" role="group" aria-label="逛一会儿兴趣">{browseInterests.map(interest => <button key={interest.id} aria-pressed={browseInterest === interest.id} className={browseInterest === interest.id ? 'selected' : ''} onClick={() => setBrowseInterest(interest.id)}>{interest.label}</button>)}</div>{browseItems.length > 4 && <button className="browse-next" onClick={() => setBrowseOffset(browseStart + 4 >= browseItems.length ? 0 : browseStart + 4)}><RefreshCw size={13} />换一组<span>{Math.floor(browseStart / 4) + 1}/{Math.ceil(browseItems.length / 4)}</span></button>}</div>
+              {browseItems.length > 0 ? <div className="browse-cards">{browseItems.slice(browseStart, browseStart + 4).map(item => {
+                const video = item.kind === 'video' || item.mediaType === 'video';
+                const source = sourceMap.get(item.sourceId);
+                return <article className="browse-card" key={item.id}>
+                  <button className={'browse-cover ' + (!item.image ? 'without-image' : '')} aria-label={'打开内容：' + item.title} onClick={() => open(item)}>{item.image ? <img src={safeUrl(item.image)} alt="" loading="lazy" referrerPolicy="no-referrer" onError={event => { event.currentTarget.style.opacity = '0'; }} /> : <span className="browse-cover-symbol">{video ? <Play size={28} /> : item.kind === 'topic' ? <Flame size={28} /> : <Sparkles size={28} />}</span>}<span className="browse-format">{video ? <><Play size={10} />视频</> : item.kind === 'post' ? '推荐帖子' : item.kind === 'topic' ? '社区热议' : '科技读物'}</span><span className="browse-cover-open"><ArrowUpRight size={14} /></span></button>
+                  <div className="browse-card-copy"><span className="browse-source">{source?.label || '内容来源'}</span><button className="browse-title" onClick={() => open(item)}><h3>{item.title}</h3></button><div className="browse-card-foot"><span title={fullTime(item.fetchedAt)}>{source && sourceState(source).tone === 'warning' ? '缓存 · ' : ''}{relativeTime(item.fetchedAt)}</span><IconButton label={favorite(item.id) ? '取消收藏：' + item.title : '收藏：' + item.title} active={favorite(item.id)} onClick={() => save(item)}><Bookmark size={14} /></IconButton></div></div>
+                </article>;
+              })}</div> : <div className="browse-empty"><Sparkles size={22} /><p>这个兴趣下还没有可用内容，换个频道继续逛逛吧。</p><button className="text-button" onClick={() => go('trends')}>查看各平台状态 <ArrowUpRight size={13} /></button></div>}
+              <footer className="browse-foot"><span>来自当前内容快照 · 按来源轮流展示，兴趣由标题与内容类型筛选。</span><button className="text-button" onClick={() => { setPlatform(browseInterest === 'daily' ? 'xiaohongshu' : browseInterest === 'tech' ? 'zhihu' : 'bilibili'); go('trends'); }}>继续发现 <ArrowUpRight size={12} /></button></footer>
+            </section>
             <div className="today-grid"><div className="today-main"><div className="lead-grid">{lead ? <Featured item={lead} source={sourceMap.get(lead.sourceId)} onOpen={() => open(lead)} /> : <div className="featured-story empty-feature"><Globe2 /><h2>{feed.loading ? '正在打开今天的世界' : '等待第一批真实内容'}</h2><p>{feed.loading ? '稍等片刻，正在读取来源快照。' : '还没有可用的新闻快照。你仍可以记录笔记，或查看来源状态。'}</p><button className="button" onClick={() => go('settings')}>查看来源状态 <ArrowRight size={15} /></button></div>}<div className="secondary-stories">{second.map(item => <article key={item.id}><span className="channel-label">{item.channel}</span><button className="news-title-button" onClick={() => open(item)}><h3>{item.title}</h3></button><div className="secondary-footer"><span>{sourceMap.get(item.sourceId)?.label}</span><ArrowUpRight size={17} /></div></article>)}{!second.length && <div className="secondary-placeholder"><BookOpen /><p>好的阅读，<br />从真实的来源开始。</p></div>}</div></div>
               <section className="latest-section"><div className="section-heading"><h2>值得一读 <span className="section-count">{articles.length}</span></h2><button className="text-button" onClick={() => go('news')}>全部新闻 <ArrowRight size={14} /></button></div><div className="channel-tabs" role="group" aria-label="新闻频道">{channels.map(c => <button className={channel === c ? 'selected' : ''} key={c} onClick={() => setChannel(c)}>{c}</button>)}</div><div className="feed-list">{filteredNews.length ? renderRows(filteredNews.filter(i => channel !== '全部' || i.id !== lead?.id)) : <Empty title="这个频道还很安静" text="当前没有符合条件的内容，可以换个频道或调整来源。" />}</div></section>
             </div><aside className="today-rail"><TrendPreview source={workingTrend} items={trends.filter(i => i.sourceId === workingTrend?.id)} onOpen={open} onMore={() => { setPlatform(workingTrend?.platform || 'bilibili'); go('trends'); }} />
@@ -226,9 +282,28 @@ export default function App() {
             <div className="page-heading"><div><span className="eyebrow">READ THE WORLD</span><h1>新闻，与你有关。</h1><p>从多个视角，接近事情的全貌。</p></div><button className="button" onClick={() => void feed.refresh()} disabled={feed.loading}><RefreshCw className={feed.loading ? 'spin' : ''} /> 检查更新</button></div>
             <div className="feed-toolbar"><div className="channel-tabs">{channels.map(c => <button key={c} className={channel === c ? 'selected' : ''} onClick={() => setChannel(c)}>{c}</button>)}</div><label className="source-select"><ListFilter size={14} /><select aria-label="筛选新闻来源" value={sourceFilter} onChange={e => setSourceFilter(e.target.value)}><option value="">全部来源</option>{sources.filter(s => s.category === 'news').map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select><ChevronDown size={13} /></label></div><div className="wide-feed feed-list">{filteredNews.length ? renderRows(filteredNews) : <Empty title="没有符合条件的新闻" text="可以换个来源、频道，或稍后再来。" />}</div>
           </> : page === 'trends' ? <>
-            <div className="page-heading"><div><span className="eyebrow">THE CONVERSATION</span><h1>此刻，大家在看。</h1><p>热点各有温度，保持自己的视角。</p></div><button className="button" onClick={() => void feed.refresh()} disabled={feed.loading}><RefreshCw className={feed.loading ? 'spin' : ''} /> 检查更新</button></div><div className="platform-tabs">{platforms.map(p => <button key={p.id} className={platform === p.id ? 'selected' : ''} onClick={() => setPlatform(p.id)}><span className={'platform-logo ' + p.id}>{p.short}</span><span>{p.name}<small>{p.subtitle}</small></span><ArrowUpRight size={15} /></button>)}</div>
-            {platform === 'xiaohongshu' ? <Suspense fallback={<div className="quiet-note">正在打开推荐帖子…</div>}><FeatureBoundary key={platform} name="推荐帖子"><Recommendations sources={sources} items={visibleItems.filter(i => sourceMap.get(i.sourceId)?.platform === 'xiaohongshu')} onOpen={open} onSave={save} isSaved={id => favorite(id)} /></FeatureBoundary></Suspense> : (() => { const s = sources.find(s => s.platform === platform); const p = platforms.find(p => p.id === platform)!; const list = trends.filter(i => sourceMap.get(i.sourceId)?.platform === platform).sort((a, b) => (a.rank || 999) - (b.rank || 999)); const state = s ? sourceState(s) : { label: '暂未接通', tone: 'warning' }; return <section className="ranking-panel"><div className="ranking-header"><h2>{p.name} · {platform === 'bilibili' ? '综合排行榜' : '热搜榜'}</h2><span className={'status-pill ' + state.tone}>{state.label}</span><span className="last-fetched">获取于 {fullTime(s?.lastSuccessAt)}</span><a className="text-button" href={safeUrl(s?.homepage) || p.url} target="_blank" rel="noopener noreferrer">原站榜单 <ArrowUpRight size={14} /></a></div>{list.length ? <div className={'rank-list ' + (platform === 'bilibili' ? 'video-ranks' : '')}>{list.slice(0, visibleCount).map((item, index) => <article className="ranking-row" key={item.id}><span className={'rank-number rank-' + index}>{item.rank || index + 1}</span>{item.image && <button className="rank-thumb" aria-label={'观看 ' + item.title} onClick={() => open(item)}><img src={item.image} loading="lazy" alt="" referrerPolicy="no-referrer" />{item.kind === 'video' && <Play size={15} />}</button>}<div className="rank-copy"><button className="news-title-button" onClick={() => open(item)}><h3>{item.title}</h3></button><div>{item.author && <span>{item.author}</span>}{item.heat && <span><Flame size={11} /> {item.heat}</span>}</div></div><IconButton label={favorite(item.id) ? '取消收藏' : '收藏'} active={favorite(item.id)} onClick={() => save(item)}><Bookmark /></IconButton><button className="rank-open" onClick={() => open(item)} aria-label={'打开 ' + item.title}><ArrowUpRight size={18} /></button></article>)}{list.length > visibleCount && <button className="button load-more" onClick={() => setVisibleCount(n => n + 20)}>展开更多 <ArrowDown size={14} /></button>}</div> : <Empty title="这份榜单暂未接通" text={s?.message || '暂时没有可用的自动更新数据，你可以直接前往原站查看。'} icon={<Flame />}><a className="button primary" href={p.url} target="_blank" rel="noopener noreferrer">前往{p.name} <ArrowUpRight size={15} /></a></Empty>}<div className="ranking-footnote">各平台热度口径不同，仅在同一榜单内比较。{s?.message && list.length > 0 ? ' ' + s.message : ''}</div></section>; })()}
-          </> : page === 'markets' ? <>
+            <div className="page-heading"><div><span className="eyebrow">THE CONVERSATION</span><h1>此刻，大家在看。</h1><p>热搜、脑洞和认真提问，各有各的热闹。</p></div><div className="trends-heading-actions"><button className="button" onClick={() => go('radar')}><Orbit size={15} />看看热词星图</button><button className="button" onClick={() => void feed.refresh()} disabled={feed.loading}><RefreshCw className={feed.loading ? 'spin' : ''} />检查更新</button></div></div>
+            <div className="platform-tabs" role="group" aria-label="热榜平台">{platforms.map(p => <button key={p.id} aria-pressed={platform === p.id} className={platform === p.id ? 'selected' : ''} onClick={() => setPlatform(p.id)}><span className={'platform-logo ' + p.id}>{p.short}</span><span>{p.name}<small>{p.subtitle}</small></span><ArrowUpRight size={15} /></button>)}</div>
+            {platform === 'xiaohongshu' ? <Suspense fallback={<div className="quiet-note">正在打开推荐帖子…</div>}><FeatureBoundary key={platform} name="推荐帖子"><Recommendations sources={sources} items={visibleItems.filter(i => sourceMap.get(i.sourceId)?.platform === 'xiaohongshu')} onOpen={open} onSave={save} isSaved={id => favorite(id)} /></FeatureBoundary></Suspense> : (() => {
+              const source = sources.find(candidate => candidate.platform === platform);
+              const selectedPlatform = platforms.find(candidate => candidate.id === platform)!;
+              const list = trends.filter(item => sourceMap.get(item.sourceId)?.platform === platform).sort((a, b) => (a.rank ?? Number.MAX_SAFE_INTEGER) - (b.rank ?? Number.MAX_SAFE_INTEGER));
+              const state = source ? sourceState(source) : { label: '暂未接通', tone: 'warning' };
+              const heading = platform === 'twitter' ? source?.label || selectedPlatform.name + ' · ' + selectedPlatform.subtitle : source?.label || selectedPlatform.name + ' · 热榜';
+              return <section className={'ranking-panel ranking-platform-' + platform}>
+                <div className="ranking-header"><h2>{heading}</h2><span className={'status-pill ' + state.tone}>{state.label}</span><span className="last-fetched">获取于 {fullTime(source?.lastSuccessAt)}</span><a className="text-button" href={safeUrl(source?.homepage) || selectedPlatform.url} target="_blank" rel="noopener noreferrer">原站查看 <ArrowUpRight size={14} /></a></div>
+                {list.length > 0 ? <div className={'rank-list ' + (platform === 'bilibili' ? 'video-ranks' : '')}>{list.slice(0, visibleCount).map((item, index) => <article className="ranking-row" key={item.id}>
+                  <span className={'rank-number ' + (item.rank === undefined ? 'rank-unordered' : 'rank-' + index)} aria-label={item.rank === undefined ? '趋势条目，无官方名次' : '第' + item.rank + '名'}>{item.rank ?? '·'}</span>
+                  {item.image && <button className="rank-thumb" aria-label={(item.kind === 'video' || item.mediaType === 'video' ? '观看 ' : '打开内容：') + item.title} onClick={() => open(item)}><img src={safeUrl(item.image)} loading="lazy" alt="" referrerPolicy="no-referrer" />{(item.kind === 'video' || item.mediaType === 'video') && <Play size={15} />}</button>}
+                  <div className="rank-copy"><button className="news-title-button" onClick={() => open(item)}><h3>{item.title}</h3></button><div>{item.author && <span>{item.author}</span>}{item.heat && <span><Flame size={11} />{item.heat}</span>}</div></div><IconButton label={favorite(item.id) ? '取消收藏' : '收藏'} active={favorite(item.id)} onClick={() => save(item)}><Bookmark /></IconButton><button className="rank-open" onClick={() => open(item)} aria-label={'打开 ' + item.title}><ArrowUpRight size={18} /></button>
+                </article>)}{list.length > visibleCount && <button className="button load-more" onClick={() => setVisibleCount(count => count + 20)}>展开更多 <ArrowDown size={14} /></button>}</div> : <Empty title={platform === 'twitter' ? '这份地区趋势暂时没有可用数据' : '这份榜单暂未接通'} text={source?.message || '暂时没有可用的自动更新数据，可以直接前往原站看看。'} icon={<Flame />}><a className="button primary" href={selectedPlatform.url} target="_blank" rel="noopener noreferrer">前往{selectedPlatform.name} <ArrowUpRight size={15} /></a></Empty>}
+                <div className="ranking-footnote">{platform === 'twitter' ? '按来源返回的地区趋势展示；未提供官方名次的条目以圆点标记。' : '各平台热度口径不同，仅在同一榜单内比较。'}{source?.message && list.length > 0 ? ' ' + source.message : ''}{source?.attribution && <span className="ranking-attribution">{source.attribution}</span>}</div>
+              </section>;
+            })()}
+          </> : page === 'radar' ? <>
+            <div className="page-heading"><div><span className="eyebrow">CONNECT THE CONVERSATION</span><h1>把热闹，拼成一张图。</h1><p>从你已载入的新闻、视频和社区话题中，发现反复出现的词。</p></div><button className="button" onClick={() => go('trends')}><Flame size={15} />回到各平台</button></div>
+            <Suspense fallback={<div className="quiet-note">正在整理标题里的热词…</div>}><FeatureBoundary key={page} name="热点星图"><HotwordRadar items={visibleItems} sources={sources} generationId={feed.snapshot.generationId} onOpen={open} onRefresh={() => void feed.refresh()} refreshing={feed.loading} /></FeatureBoundary></Suspense>
+          </> : page === 'office' ? <Suspense fallback={<div className="quiet-note">正在打开小队的办公室…</div>}><FeatureBoundary key={page} name="AI 办公室"><AiOffice items={visibleItems} sources={sources} watchSymbols={watchedInstruments.map(instrument => instrument.symbol)} notes={activeNotes} privateOfficeUrl={import.meta.env.VITE_PRIVATE_OFFICE_URL} standalone={false} onOpen={open} /></FeatureBoundary></Suspense> : page === 'markets' ? <>
             <div className="page-heading"><div><span className="eyebrow">MARKET JOURNAL</span><h1>我的看盘桌面。</h1><p>关注自己的标的，在 K 线与价格变化中理解市场。</p></div><a className="button" href="https://quote.eastmoney.com/center/" target="_blank" rel="noopener noreferrer">更多市场信息 <ArrowUpRight size={15} /></a></div><div className="channel-tabs market-tabs">{['全部市场', 'A股', '美股', '大宗商品', '我的自选'].map(t => <button className={market === t ? 'selected' : ''} onClick={() => setMarket(t)} key={t}>{t}</button>)}</div>
             <Suspense fallback={<div className="quiet-note">正在准备来源图表…</div>}><FeatureBoundary key={page} name="行情图表"><MarketWidget market={market} onToast={notify} onMarketChange={setMarket} /></FeatureBoundary></Suspense>
             <section><div className="section-heading"><h2>财经观察</h2><span className="quiet-label">政策、公司与全球经济</span></div><div className="feed-list">{articles.filter(i => i.channel === '财经').length ? renderRows(articles.filter(i => i.channel === '财经')) : <Empty title="财经报道等待更新" text="可先查看新闻中心的其他频道。" />}</div></section>
@@ -239,7 +314,7 @@ export default function App() {
         <footer className="page-footer"><span>信息书房 <span className="footer-divider">/</span> 看见世界，留下思考</span><span>{feed.snapshot.generatedAt ? '内容快照 · ' + fullTime(feed.snapshot.generatedAt) : '期待与你的每一次阅读'}</span></footer>
       </main>
     </div>
-    <nav className="mobile-bottom-nav" aria-label="手机导航">{nav.filter(n => n.id !== 'news' && n.id !== 'game').map(n => <button className={page === n.id ? 'current' : ''} key={n.id} onClick={() => go(n.id)}><n.icon size={19} /><span>{n.name}</span></button>)}<button onClick={() => setMobileOpen(true)}><Menu size={19} /><span>更多</span></button></nav>
+    <nav className="mobile-bottom-nav" aria-label="手机导航">{nav.filter(n => mobilePages.includes(n.id)).map(n => <button className={page === n.id ? 'current' : ''} key={n.id} onClick={() => go(n.id)}><n.icon size={19} /><span>{n.name}</span></button>)}<button className={!mobilePages.includes(page) ? 'current' : ''} onClick={() => setMobileOpen(true)} aria-label="更多页面"><Menu size={19} /><span>更多</span></button></nav>
     {reader && <Reader key={reader.id} item={reader} source={sourceMap.get(reader.sourceId)} onClose={() => setReader(null)} onSave={() => save(reader)} onLater={() => save(reader, 'later')} onNote={() => note(reader)} saved={favorite(reader.id)} later={favorite(reader.id, 'later')} fontSize={prefs.fontSize} setFont={n => mutate(() => personal.setPrefs({ fontSize: n }))} width={prefs.readerWidth} />}
     <ReminderNotifier onToast={notify} />
     {toast && <div className="toast" role="status"><Check size={17} /><span>{toast}</span><button aria-label="关闭提示" onClick={() => setToast('')}><X size={14} /></button></div>}

@@ -47,14 +47,18 @@ jobs:
           ENABLE_TENCENT_QUOTES: ${{ vars.ENABLE_TENCENT_QUOTES }}
           SANDBASE_API_KEY: ${{ secrets.SANDBASE_API_KEY }}
           TIKHUB_API_KEY: ${{ secrets.TIKHUB_API_KEY }}
+          TWITTER_TRENDS_COUNTRY: ${{ vars.TWITTER_TRENDS_COUNTRY }}
           FORCE_XIAOHONGSHU_REFRESH: ${{ github.event_name == 'workflow_dispatch' && inputs.refresh_recommendations }}
       - run: npm test
+      - name: Verify private office orchestration and key isolation
+        run: npm test --prefix ai-office-server
       - name: Verify snapshot persistence with isolated local Git repositories
         run: node scripts/verify-snapshot-state.mjs
       - name: Build for repository Pages path
         run: npm run build
         env:
           BASE_PATH: ${{ endsWith(github.event.repository.name, '.github.io') && '/' || format('/{0}/', github.event.repository.name) }}
+          VITE_PRIVATE_OFFICE_URL: https://daily-study-ai-office-qmy.plushmaze3.chatgpt.site
       - name: Retain public snapshots across runs
         run: node scripts/snapshot-state.mjs persist
       - uses: actions/configure-pages@v5

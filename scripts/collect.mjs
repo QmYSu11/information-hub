@@ -6,6 +6,7 @@ import { assertPublicSnapshot, parseRSS, parseBilibili, preserveFailedSource } f
 import { collectOptionalQuotes, emptyQuotes } from './quotes.mjs';
 import { collectXiaohongshu } from './xiaohongshu.mjs';
 import { collectWeibo } from './weibo.mjs';
+import { collectSocialTrends } from './social-trends.mjs';
 
 const project = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const output = resolve(project, 'public/data/snapshot.json');
@@ -38,7 +39,7 @@ export async function fetchPublic(url, { json = false, encoding = 'utf-8' } = {}
   return json ? JSON.parse(text) : text;
 }
 
-const [publicResults, weiboResult] = await Promise.all([Promise.all([...feeds, ...trends].map(async (definition) => {
+const [publicResults, weiboResult, socialResults] = await Promise.all([Promise.all([...feeds, ...trends].map(async (definition) => {
   const { endpoint, parser, ...source } = definition;
   try {
     const raw = await fetchPublic(endpoint, { json: Boolean(parser) });
@@ -51,9 +52,10 @@ const [publicResults, weiboResult] = await Promise.all([Promise.all([...feeds, .
     console.log('UNAVAILABLE', source.id, message);
     return preserveFailedSource(source, previous, now, message);
   }
-})), collectWeibo({ now, previous })]);
-const results = [...publicResults, weiboResult];
+})), collectWeibo({ now, previous }), collectSocialTrends({ now, previous })]);
+const results = [...publicResults, weiboResult, ...socialResults];
 console.log(weiboResult.source.status === 'ok' ? 'OK' : 'UNAVAILABLE', 'weibo-hot', weiboResult.items.length + ' 条；' + weiboResult.source.message);
+socialResults.forEach(result => console.log(result.source.status === 'ok' ? 'OK' : 'UNAVAILABLE', result.source.id, result.items.length + ' 条；' + result.source.message));
 
 const quoteResult = await collectOptionalQuotes({ now, previous, fetchPublic });
 const xiaohongshuResult = await collectXiaohongshu({ now, previous, forceRefresh: process.env.FORCE_XIAOHONGSHU_REFRESH === 'true' });
